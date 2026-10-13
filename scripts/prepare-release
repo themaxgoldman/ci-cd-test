@@ -1,0 +1,35 @@
+#!/bin/bash
+set -euo pipefail
+
+REPO="${1:?usage: prepare-release OWNER/REPO}"
+BASE="main"
+HEAD="prod-release"
+SOURCE="staging"
+TITLE="Release: prod-release → Main"
+
+list_commits() {
+    gh api "repos/$REPO/compare/$1...$2" --jq '.commits[] | "- \(.commit.message | split("\n")[0])"'
+}
+
+in_release=$(list_commits "$BASE" "$HEAD")
+not_released=$(list_commits "$HEAD" "$SOURCE")
+
+body="## In This Release
+
+${in_release:-_Nothing to release._}
+
+## On Staging, Not In This Release
+
+${not_released:-_Everything merged into \`$SOURCE\` is in this release._}"
+
+pr=$(gh pr list --repo "$REPO" --base "$BASE" --head "$HEAD" --state open --json number --jq '.[0].number // empty')
+if [[ -z "$pr" ]]; then
+    if [[ -z "$in_release" ]]; then
+        echo "No commits between $BASE and $HEAD. Nothing to release."
+        exit 0
+    fi
+    gh pr create --repo "$REPO" --base "$BASE" --head "$HEAD" --title "$TITLE" --body "$body"
+else
+    gh api --method PATCH "repos/$REPO/pulls/$pr" -f body="$body" --silent
+    echo "Updated release PR #$pr"
+fi

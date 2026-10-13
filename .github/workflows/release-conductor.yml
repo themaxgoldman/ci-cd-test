@@ -1,0 +1,22 @@
+---
+name: Release train conductor
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge the release PR
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          read -r PR SHA < <(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head prod-release --state open \
+            --json number,headRefOid --jq '.[0] | select(. != null) | "\(.number) \(.headRefOid)"') || true
+          if [ -z "${PR:-}" ]; then
+            echo "No open release PR, nothing to release"
+            exit 0
+          fi
+          gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$SHA"
+          echo "Merged release PR #$PR at $SHA"

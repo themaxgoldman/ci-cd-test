@@ -1,0 +1,95 @@
+#!/bin/bash
+set -euo pipefail
+#MISE description="Fast-forward the prod-release branch to a commit that passed every staging check"
+
+usage() {
+    cat <<'EOF'
+Usage: mise run github:advance-prod-release --sha SHA [OPTIONS]
+
+Move the prod-release branch forward to SHA. Does nothing when the branch is
+already at or past SHA, and refuses anything that is not a fast-forward.
+
+Options:
+  --sha SHA            Commit to move the branch to (required)
+  --branch NAME        Branch to move (default: prod-release)
+  --repo OWNER/REPO    GitHub repository (default: current repo from gh)
+  --dry-run            Report what would happen without moving the branch
+  -h, --help           Show this help message
+
+Environment:
+  GH_TOKEN / GITHUB_TOKEN    GitHub token allowed to push to the branch
+
+Examples:
+  mise run github:advance-prod-release --sha abc123
+  mise run github:advance-prod-release --sha abc123 --dry-run
+EOF
+}
+
+SHA=""
+BRANCH="prod-release"
+REPO=""
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+    --sha | --branch | --repo)
+        if [[ -z "${2:-}" ]]; then
+            echo "ERROR: $1 requires a value" >&2
+            usage
+            exit 1
+        fi
+        case "$1" in
+        --sha) SHA="$2" ;;
+        --branch) BRANCH="$2" ;;
+        --repo) REPO="$2" ;;
+        esac
+        shift 2
+        ;;
+    *)
+        echo "ERROR: Unexpected argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+done
+
+if [[ -z "$SHA" ]]; then
+    echo "ERROR: --sha is required" >&2
+    usage
+    exit 1
+fi
+
+if [[ -z "$REPO" ]]; then
+    REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
+fi
+
+current=$(gh api "repos/$REPO/branches/$BRANCH" --jq '.commit.sha')
+relation=$(gh api "repos/$REPO/compare/$current...$SHA" --jq '.status')
+
+case "$relation" in
+identical | behind)
+    echo "$BRANCH is already at or past $SHA ($current), nothing to do" >&2
+    exit 0
+    ;;
+ahead) ;;
+*)
+    echo "ERROR: $SHA is not ahead of $BRANCH ($current): $relation" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$DRY_RUN" == true ]]; then
+    echo "Would move $BRANCH from $current to $SHA" >&2
+    exit 0
+fi
+
+gh api --method PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$SHA" -F force=false --silent
+echo "Moved $BRANCH from $current to $SHA" >&2

@@ -1,0 +1,40 @@
+---
+name: Simulated ArgoCD
+on:
+  repository_dispatch:
+    types: [fake-argocd-sync]
+
+concurrency:
+  group: simulated-argocd
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      deployments: write
+    env:
+      SHA: ${{ github.event.client_payload.sha }}
+      DEPLOYMENT: ${{ github.event.client_payload.deployment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.sha }}
+
+      - name: Roll the commit out to staging, then start its acceptance tests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VARS_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          source sim.env
+          sleep "${ROLLOUT_SECONDS:-20}"
+          if [[ "${ROLLOUT:-ok}" == "hang" ]]; then
+            echo "Simulating a rollout that never finishes: no deployment status, no acceptance tests"
+            exit 0
+          fi
+          GH_TOKEN="$VARS_TOKEN" gh variable set STAGING_BACKEND_SHA --repo "$GITHUB_REPOSITORY" --body "$SHA"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT/statuses" -f state=success --silent
+          gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" \
+            -f event_type=run-e2e-tests -f "client_payload[sha]=$SHA" -f "client_payload[target]=staging"
+          echo "staging backend now runs $SHA; acceptance tests requested"
