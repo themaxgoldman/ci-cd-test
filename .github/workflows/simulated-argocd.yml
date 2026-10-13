@@ -36,6 +36,9 @@ jobs:
           fi
           GH_TOKEN="$VARS_TOKEN" gh variable set STAGING_BACKEND_SHA --repo "$GITHUB_REPOSITORY" --body "$SHA"
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT/statuses" -f state=success --silent
-          GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" \
-            -f event_type=run-e2e-tests -f "client_payload[sha]=$SHA" -f "client_payload[target]=staging"
-          echo "staging backend now runs $SHA; acceptance tests requested"
+          for ((i = 1; i <= ${ACCEPTANCE_DISPATCHES:-3}; i++)); do
+            GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" \
+              -f event_type=run-e2e-tests -f "client_payload[sha]=$SHA" -f "client_payload[target]=staging"
+            if ((i < ${ACCEPTANCE_DISPATCHES:-3})); then sleep "${DISPATCH_GAP_SECONDS:-8}"; fi
+          done
+          echo "staging backend now runs $SHA; acceptance tests requested ${ACCEPTANCE_DISPATCHES:-3} times, like ArgoCD's per-app PostSync hooks"
