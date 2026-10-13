@@ -1,0 +1,24 @@
+---
+name: Probe PR Target
+on:
+  pull_request_target:
+    types:
+      - closed
+    branches:
+      - staging
+
+jobs:
+  probe:
+    if: github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Report what this run can see and do
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_SECRET: ${{ secrets.PIPELINE_TOKEN != '' }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          echo "github.sha=$GITHUB_SHA merge_commit=$MERGE_SHA secret_available=$HAS_SECRET"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" -f state=success -f context=probe-pr-target-write -f description="pull_request_target token can write" --silent && echo "write ok"

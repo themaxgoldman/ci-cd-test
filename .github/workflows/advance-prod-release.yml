@@ -4,10 +4,13 @@ name: Advance prod-release
 on:
   workflow_run:
     workflows:
+      - Staging-CD
       - Acceptance Tests
     types:
       - completed
-  push:
+  pull_request:
+    types:
+      - closed
     branches:
       - staging
   workflow_dispatch: {}
@@ -18,10 +21,10 @@ concurrency:
 
 jobs:
   advance:
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged
     runs-on: ubuntu-latest
     permissions:
       actions: write
-      checks: write
       contents: read
       deployments: read
       pull-requests: write
