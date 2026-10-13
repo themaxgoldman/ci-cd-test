@@ -65,7 +65,7 @@ jobs:
           [[ "$ACCEPTANCE" == "pass" ]]
 
       - name: Set commit status (final)
-        if: ${{ !cancelled() }}
+        if: always()
         run: |
           STATE="${{ steps.e2e.outcome == 'success' && 'success' || 'failure' }}"
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
