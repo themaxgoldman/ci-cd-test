@@ -6,13 +6,34 @@ BASE="main"
 HEAD="prod-release"
 SOURCE="staging"
 TITLE="Release: prod-release → Main"
+HOLD_LABEL="hold for qa"
 
 list_commits() {
     gh api "repos/$REPO/compare/$1...$2" --jq '.commits[] | "- \(.commit.message | split("\n")[0])"'
 }
 
+list_not_released() {
+    local held="" lines="" line pr_number
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        pr_number=$(grep -o '(#[0-9]\+)$' <<<"$line" | tr -d '(#)' || true)
+        if [[ -n "$pr_number" ]] && gh api "repos/$REPO/issues/$pr_number" \
+            --jq "any(.labels[]; .name == \"$HOLD_LABEL\")" | grep -qx true; then
+            line+=" — **held for QA**"
+            [[ -z "$held" ]] && held="#$pr_number"
+        elif [[ -n "$held" ]]; then
+            line+=" — waiting behind the QA hold on $held"
+        fi
+        lines+="$line"$'\n'
+    done < <(list_commits "$HEAD" "$SOURCE")
+    if [[ -n "$held" ]]; then
+        printf "> %s is held for QA. It and everything merged after it stay out of the release until the \`%s\` label is removed.\n\n" "$held" "$HOLD_LABEL"
+    fi
+    printf '%s' "$lines"
+}
+
 in_release=$(list_commits "$BASE" "$HEAD")
-not_released=$(list_commits "$HEAD" "$SOURCE")
+not_released=$(list_not_released)
 
 body="## In This Release
 
