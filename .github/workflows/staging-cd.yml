@@ -118,6 +118,7 @@ jobs:
       - name: Create the Staging deployment and hand it to the simulated ArgoCD
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPATCH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
         run: |
           id=$(jq -n --arg ref "$GITHUB_SHA" \
             '{ref: $ref, environment: "Staging", auto_merge: false, required_contexts: [], description: "Staging deploy for \($ref)"}' \

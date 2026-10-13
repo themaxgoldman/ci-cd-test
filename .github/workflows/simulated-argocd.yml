@@ -26,6 +26,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VARS_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          DISPATCH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
         run: |
           source sim.env
           sleep "${ROLLOUT_SECONDS:-20}"
