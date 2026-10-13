@@ -35,6 +35,6 @@ jobs:
           fi
           GH_TOKEN="$VARS_TOKEN" gh variable set STAGING_BACKEND_SHA --repo "$GITHUB_REPOSITORY" --body "$SHA"
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT/statuses" -f state=success --silent
-          gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" \
+          GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" \
             -f event_type=run-e2e-tests -f "client_payload[sha]=$SHA" -f "client_payload[target]=staging"
           echo "staging backend now runs $SHA; acceptance tests requested"
