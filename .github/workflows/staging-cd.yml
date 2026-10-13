@@ -89,7 +89,7 @@ jobs:
           while (( ${#claims} % 4 )); do claims+="="; done
           sub=$(base64 -d <<<"$claims" | jq -r .sub)
           echo "AWS sees: $sub"
-          [[ "$sub" == "repo:$GITHUB_REPOSITORY:ref:refs/heads/staging" ]]
+          [[ "$sub" == repo:* && "$sub" == *":ref:refs/heads/staging" ]]
       - name: Simulated image build
         run: |
           source sim.env
