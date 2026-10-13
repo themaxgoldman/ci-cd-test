@@ -1,0 +1,22 @@
+---
+name: Re-check release QA holds
+
+on:
+  pull_request:
+    types: [labeled, unlabeled]
+    branches:
+      - staging
+
+jobs:
+  recheck-release-pr:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.label.name == 'hold for qa' &&
+      github.event.pull_request.merged == true
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run the controller so prod-release reflects the hold
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run advance-prod-release.yml --repo "$GITHUB_REPOSITORY" --ref staging
