@@ -1,16 +1,16 @@
 #!/bin/bash
 set -euo pipefail
-#MISE description="Start the newest staging commit through Staging-CD once the commit already in it has finished"
+#MISE description="Start Staging-CD on the newest staging commit once the commit already in it has finished"
 
 usage() {
     cat <<'EOF'
 Usage: mise run github:advance-staging-pipeline [OPTIONS]
 
 One commit at a time goes through Staging-CD, its deploy and its acceptance
-tests. The commit in the pipeline is the one carrying a tag under the tag
-prefix, and creating that tag is what starts Staging-CD on it. Once that
-commit has finished, tag the newest commit on the source branch and drop
-the old tag. Until then, do nothing.
+tests. The commit in the pipeline is the newest one marked with a pending
+staging-pipeline status. Once that commit has finished, start Staging-CD on
+the source branch, which runs its newest commit, and mark that commit
+pending. Until then, do nothing.
 
 A commit has finished when its Staging-CD run is done and either its
 acceptance tests reported or its deploy never went out. A commit that has
@@ -18,16 +18,14 @@ not finished within the timeout counts as failed.
 
 Options:
   --source BRANCH        Branch PRs merge into (default: staging)
-  --tag-prefix PREFIX    Prefix of the pipeline tag (default: staging-pipeline/)
-  --workflow FILE        Workflow the tag starts (default: staging-cd.yml)
+  --workflow FILE        Workflow to start (default: staging-cd.yml)
   --timeout-minutes N    Give up on a commit after this long (default: 90)
   --repo OWNER/REPO      GitHub repository (default: current repo from gh)
   --dry-run              Report what would happen without changing anything
   -h, --help             Show this help message
 
 Environment:
-  GH_TOKEN               Token that reads runs and statuses and sets statuses
-  TAG_GH_TOKEN           Token whose tag pushes start workflows (default: GH_TOKEN)
+  GH_TOKEN               Token that reads runs and statuses, sets statuses and starts the workflow
 
 Examples:
   mise run github:advance-staging-pipeline
@@ -36,13 +34,13 @@ EOF
 }
 
 SOURCE="staging"
-TAG_PREFIX="staging-pipeline/"
 WORKFLOW="staging-cd.yml"
 TIMEOUT_MINUTES=90
 REPO=""
 DRY_RUN=false
 STATUS_CONTEXT="staging-pipeline"
 ACCEPTANCE_CONTEXT="Staging – acceptance"
+NOTIFY_JOB="notify_controller"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -54,7 +52,7 @@ while [[ $# -gt 0 ]]; do
         DRY_RUN=true
         shift
         ;;
-    --source | --tag-prefix | --workflow | --timeout-minutes | --repo)
+    --source | --workflow | --timeout-minutes | --repo)
         if [[ -z "${2:-}" ]]; then
             echo "ERROR: $1 requires a value" >&2
             usage
@@ -62,7 +60,6 @@ while [[ $# -gt 0 ]]; do
         fi
         case "$1" in
         --source) SOURCE="$2" ;;
-        --tag-prefix) TAG_PREFIX="$2" ;;
         --workflow) WORKFLOW="$2" ;;
         --timeout-minutes) TIMEOUT_MINUTES="$2" ;;
         --repo) REPO="$2" ;;
@@ -81,10 +78,6 @@ if [[ -z "$REPO" ]]; then
     REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
 fi
 
-tag_api() {
-    GH_TOKEN="${TAG_GH_TOKEN:-${GH_TOKEN:-}}" gh api "$@"
-}
-
 set_status() {
     local sha="$1" state="$2" description="$3"
     if [[ "$DRY_RUN" == true ]]; then
@@ -100,12 +93,31 @@ recorded_status() {
         --jq "[.[] | select(.context == \"$STATUS_CONTEXT\")] | first // empty | \"\(.state) \(.created_at | fromdateiso8601)\""
 }
 
+run_result() {
+    local run_id="$1" run_status="$2" run_conclusion="$3" jobs
+    if [[ "$run_status" == "completed" ]]; then
+        echo "completed $run_conclusion"
+        return
+    fi
+    jobs=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100")
+    # The run's last job is the one that starts this check, so the run counts as done once that job has started.
+    if jq -e --arg notify "$NOTIFY_JOB" 'any(.jobs[]; .name == $notify and .status != "queued" and .status != "waiting" and .status != "pending")' <<<"$jobs" >/dev/null; then
+        jq -r --arg notify "$NOTIFY_JOB" '[.jobs[] | select(.name != $notify) | .conclusion]
+            | if any(.[]; . == "failure" or . == "cancelled" or . == "timed_out" or . == "startup_failure") then "completed failure" else "completed success" end' <<<"$jobs"
+        return
+    fi
+    echo "$run_status none"
+}
+
 pipeline_state() {
     local sha="$1" recorded="$2" run run_id run_status run_conclusion acceptance deploy
 
     run=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?head_sha=$sha&per_page=1" \
         --jq '.workflow_runs[0] | select(. != null) | "\(.id) \(.status) \(.conclusion)"')
     read -r run_id run_status run_conclusion <<<"${run:-}"
+    if [[ -n "${run_id:-}" ]]; then
+        read -r run_status run_conclusion <<<"$(run_result "$run_id" "$run_status" "$run_conclusion")"
+    fi
 
     if [[ "${run_status:-}" == "completed" ]]; then
         acceptance=$(gh api "repos/$REPO/commits/$sha/status?per_page=100" \
@@ -129,12 +141,6 @@ pipeline_state() {
         fi
     fi
 
-    if [[ -z "$recorded" ]]; then
-        set_status "$sha" pending "Waiting for Staging-CD, the staging deploy and acceptance tests"
-        echo running
-        return
-    fi
-
     if (($(date -u +%s) - ${recorded#* } > TIMEOUT_MINUTES * 60)); then
         echo failed
         return
@@ -143,54 +149,36 @@ pipeline_state() {
 }
 
 start() {
-    local sha="$1" old_tag="$2"
+    local run_id sha
     if [[ "$DRY_RUN" == true ]]; then
-        echo "Would tag ${sha:0:10} as $TAG_PREFIX$sha and remove ${old_tag:-no old tag}" >&2
+        echo "Would start $WORKFLOW on $SOURCE" >&2
         return
     fi
+    run_id=$(gh api --method POST "repos/$REPO/actions/workflows/$WORKFLOW/dispatches" \
+        -f ref="$SOURCE" -F return_run_details=true --jq '.workflow_run_id')
+    sha=$(gh api "repos/$REPO/actions/runs/$run_id" --jq '.head_sha')
     set_status "$sha" pending "Waiting for Staging-CD, the staging deploy and acceptance tests"
-    tag_api --method POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG_PREFIX$sha" -f sha="$sha" --silent
-    if [[ -n "$old_tag" ]]; then
-        tag_api --method DELETE "repos/$REPO/git/refs/tags/$old_tag" --silent
-    fi
-    echo "Started ${sha:0:10} through the pipeline" >&2
+    echo "Started ${sha:0:10} through the pipeline in run $run_id" >&2
 }
 
 tip=$(gh api "repos/$REPO/branches/$SOURCE" --jq '.commit.sha')
 
-tags=$(gh api "repos/$REPO/git/matching-refs/tags/$TAG_PREFIX" --jq '.[].ref | ltrimstr("refs/tags/")')
-current_tag=""
 current=""
-for tag in $tags; do
-    sha="${tag#"$TAG_PREFIX"}"
-    if [[ -z "$current" ]] || [[ "$(gh api "repos/$REPO/compare/$current...$sha" --jq '.status')" == "ahead" ]]; then
-        if [[ -n "$current_tag" && "$DRY_RUN" != true ]]; then
-            tag_api --method DELETE "repos/$REPO/git/refs/tags/$current_tag" --silent
-        fi
-        current_tag="$tag"
+recorded=""
+for sha in $(gh api "repos/$REPO/commits?sha=$SOURCE&per_page=100" --jq '.[].sha'); do
+    recorded=$(recorded_status "$sha")
+    if [[ -n "$recorded" ]]; then
         current="$sha"
-    elif [[ "$DRY_RUN" != true ]]; then
-        tag_api --method DELETE "repos/$REPO/git/refs/tags/$tag" --silent
+        break
     fi
 done
 
 if [[ -z "$current" ]]; then
-    for sha in $(gh api "repos/$REPO/commits?sha=$SOURCE&per_page=30" --jq '.[].sha'); do
-        if [[ "$(recorded_status "$sha")" == pending* ]]; then
-            echo "The pipeline tag was deleted, but ${sha:0:10} is still marked as running" >&2
-            current="$sha"
-            break
-        fi
-    done
-fi
-
-if [[ -z "$current" ]]; then
-    echo "Nothing is in the pipeline" >&2
-    start "$tip" ""
+    echo "Nothing has been through the pipeline yet" >&2
+    start
     exit 0
 fi
 
-recorded=$(recorded_status "$current")
 case "${recorded%% *}" in
 success) state=passed ;;
 failure | error) state=failed ;;
@@ -213,10 +201,4 @@ if [[ "$current" == "$tip" ]]; then
     exit 0
 fi
 
-relation=$(gh api "repos/$REPO/compare/$current...$tip" --jq '.status')
-if [[ "$relation" != "ahead" ]]; then
-    echo "ERROR: $SOURCE ($tip) is not ahead of the pipeline commit ($current): $relation" >&2
-    exit 1
-fi
-
-start "$tip" "$current_tag"
+start
