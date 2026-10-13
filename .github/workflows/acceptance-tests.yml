@@ -1,0 +1,67 @@
+---
+name: Acceptance Tests
+on:
+  repository_dispatch:
+    types: [run-e2e-tests]
+
+concurrency:
+  group: e2e-tests-staging
+  cancel-in-progress: true
+
+jobs:
+  e2e-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+    env:
+      SHA: ${{ github.event.client_payload.sha }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.sha }}
+
+      - name: Set commit status (pending)
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=pending -f context="Staging – acceptance" -f description="Acceptance tests running..." --silent
+
+      - name: Run simulated acceptance tests while checking staging never changes underneath them
+        id: e2e
+        env:
+          VARS_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          source sim.env
+          live() { GH_TOKEN="$VARS_TOKEN" gh variable get "$1" --repo "$GITHUB_REPOSITORY"; }
+          frontend_at_start=$(live STAGING_FRONTEND_SHA)
+          misaligned=""
+          end=$((SECONDS + ${ACCEPTANCE_SECONDS:-60}))
+          while ((SECONDS < end)); do
+            backend=$(live STAGING_BACKEND_SHA)
+            frontend=$(live STAGING_FRONTEND_SHA)
+            if [[ "$backend" != "$SHA" ]]; then
+              misaligned="backend switched to $backend during the run"
+            elif [[ "$frontend" != "$frontend_at_start" ]]; then
+              misaligned="frontend switched to $frontend during the run"
+            fi
+            [[ -n "$misaligned" ]] && break
+            sleep 5
+          done
+          if [[ -n "$misaligned" ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+              -f state=failure -f context=alignment -f description="MISALIGNED: $misaligned" --silent
+            echo "::error::MISALIGNED: $misaligned"
+            exit 1
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=success -f context=alignment -f description="staging stayed on this commit for the whole run" --silent
+          echo "acceptance=$ACCEPTANCE"
+          [[ "$ACCEPTANCE" == "pass" ]]
+
+      - name: Set commit status (final)
+        if: always()
+        run: |
+          STATE="${{ steps.e2e.outcome == 'success' && 'success' || 'failure' }}"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state="$STATE" -f context="Staging – acceptance" -f description="Acceptance tests $STATE" --silent

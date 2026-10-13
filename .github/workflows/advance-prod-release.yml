@@ -1,0 +1,107 @@
+---
+name: Advance prod-release
+
+on:
+  workflow_run:
+    workflows:
+      - Staging-CD
+      - Acceptance Tests
+    types:
+      - completed
+  push:
+    branches:
+      - staging
+  workflow_dispatch: {}
+
+concurrency:
+  group: advance-prod-release
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+      pull-requests: write
+      statuses: write
+    env:
+      PIPELINE_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging
+
+      - name: Recreate prod-release if it was deleted
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          if ! gh api "repos/$GITHUB_REPOSITORY/branches/prod-release" --silent 2>/dev/null; then
+            base=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...staging" --jq '.merge_base_commit.sha')
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/heads/prod-release -f sha="$base" --silent
+            echo "prod-release was missing, recreated it at $base, the last released commit"
+          fi
+
+      - name: Start the next commit through the staging pipeline
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          STATUS_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/advance-staging-pipeline --repo "$GITHUB_REPOSITORY" --timeout-minutes "${{ vars.PIPELINE_TIMEOUT_MINUTES || 90 }}"
+
+      - name: Check for a release freeze
+        id: freeze
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head prod-release --state open --json number --jq '.[0].number // empty')
+          frozen=false
+          if [[ -n "$pr" ]]; then
+            frozen=$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json labels --jq 'any(.labels[]; .name == "release-freeze")')
+          fi
+          if [[ "$frozen" == "true" ]]; then
+            echo "Release freeze is on for #$pr, so prod-release stays where it is"
+          fi
+          echo "frozen=$frozen" >> "$GITHUB_OUTPUT"
+
+      - name: Find the newest commit that passed every staging check
+        id: find
+        if: steps.freeze.outputs.frozen != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha=$(bash scripts/find-verified-commit --repo "$GITHUB_REPOSITORY")
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Mark the commit verified
+        if: steps.find.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.find.outputs.sha }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=success -f context=staging-verified -f description="Passed every staging check" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --silent
+
+      - name: Advance prod-release
+        if: steps.find.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          SHA: ${{ steps.find.outputs.sha }}
+        run: bash scripts/advance-prod-release --sha "$SHA" --repo "$GITHUB_REPOSITORY"
+
+      - name: Update the release PR
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: bash scripts/prepare-release "$GITHUB_REPOSITORY"
+
+      - name: Approve the release PR again if a move dismissed its approval
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head prod-release --state open --json number --jq '.[0].number // empty')
+          [[ -z "$pr" ]] && exit 0
+          decision=$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json reviewDecision --jq '.reviewDecision')
+          if [[ "$decision" != "APPROVED" ]]; then
+            gh pr review "$pr" --repo "$GITHUB_REPOSITORY" --approve --body "Auto approved release PR"
+          fi

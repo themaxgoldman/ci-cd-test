@@ -1,0 +1,31 @@
+---
+name: Prod-CD
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Check the released commit is a verified staging commit, then simulate the prod deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          released=$(git rev-parse HEAD^2 2>/dev/null) || { echo "::error::HEAD is not a merge commit"; exit 1; }
+          verified=$(gh api "repos/$GITHUB_REPOSITORY/commits/$released/statuses?per_page=100" \
+            --jq '[.[] | select(.context == "staging-verified" and .state == "success")] | length')
+          if [[ "$verified" == "0" ]]; then
+            echo "::error::released commit $released is not staging-verified"
+            exit 1
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$released" \
+            -f state=success -f context=prod-deployed -f description="Simulated production deploy" --silent
+          echo "Deployed $released to (simulated) production"

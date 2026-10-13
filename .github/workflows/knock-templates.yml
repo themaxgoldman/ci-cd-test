@@ -1,0 +1,17 @@
+---
+name: Knock Email Templates
+on:
+  workflow_call: {}
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Simulated Knock template sync to staging
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=success -f context=knock-sync -f description="Knock templates synced for this commit" --silent

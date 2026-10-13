@@ -1,0 +1,161 @@
+#!/bin/bash
+set -euo pipefail
+#MISE description="Print the newest staging commit past prod-release that passed every staging check"
+
+usage() {
+    cat <<'EOF'
+Usage: mise run github:find-verified-commit [OPTIONS]
+
+Print the newest commit on the source branch, past the base, that passed
+every staging check:
+  - its Staging-CD run succeeded
+  - its Staging deployment succeeded
+  - the staging acceptance tests passed on it
+
+A commit whose PR carries the hold label, and every commit after it, is
+never chosen. Prints nothing when no commit qualifies.
+
+Options:
+  --source BRANCH      Branch to search (default: staging)
+  --branch NAME        Branch whose tip is the base (default: prod-release)
+  --base SHA           Use this commit as the base instead of the branch tip
+  --workflow FILE      Workflow whose run must succeed (default: staging-cd.yml)
+  --hold-label NAME    PR label that keeps a commit out (default: hold for qa)
+  --max-commits N      Give up after checking this many commits (default: 100)
+  --repo OWNER/REPO    GitHub repository (default: current repo from gh)
+  -h, --help           Show this help message
+
+Environment:
+  GH_TOKEN / GITHUB_TOKEN    GitHub token that can read commits, PRs, workflow runs, deployments and statuses
+
+Examples:
+  mise run github:find-verified-commit
+  mise run github:find-verified-commit --base abc123 --max-commits 20
+EOF
+}
+
+SOURCE="staging"
+BRANCH="prod-release"
+BASE=""
+WORKFLOW="staging-cd.yml"
+HOLD_LABEL="hold for qa"
+MAX_COMMITS=100
+REPO=""
+ACCEPTANCE_CONTEXT="Staging – acceptance"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    --source | --branch | --base | --workflow | --hold-label | --max-commits | --repo)
+        if [[ -z "${2:-}" ]]; then
+            echo "ERROR: $1 requires a value" >&2
+            usage
+            exit 1
+        fi
+        case "$1" in
+        --source) SOURCE="$2" ;;
+        --branch) BRANCH="$2" ;;
+        --base) BASE="$2" ;;
+        --workflow) WORKFLOW="$2" ;;
+        --hold-label) HOLD_LABEL="$2" ;;
+        --max-commits) MAX_COMMITS="$2" ;;
+        --repo) REPO="$2" ;;
+        esac
+        shift 2
+        ;;
+    *)
+        echo "ERROR: Unexpected argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+done
+
+if [[ -z "$REPO" ]]; then
+    REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
+fi
+
+if [[ -z "$BASE" ]]; then
+    BASE=$(gh api "repos/$REPO/branches/$BRANCH" --jq '.commit.sha')
+fi
+
+tip=$(gh api "repos/$REPO/branches/$SOURCE" --jq '.commit.sha')
+relation=$(gh api "repos/$REPO/compare/$BASE...$tip" --jq '.status')
+case "$relation" in
+ahead) ;;
+identical | behind)
+    echo "$SOURCE ($tip) has nothing past $BASE" >&2
+    exit 0
+    ;;
+*)
+    echo "ERROR: $SOURCE ($tip) is not ahead of $BASE: $relation" >&2
+    exit 1
+    ;;
+esac
+
+is_held() {
+    local pr_number
+    pr_number=$(grep -o '(#[0-9]\+)$' <<<"$1" | tr -d '(#)' || true)
+    [[ -n "$pr_number" ]] || return 1
+    gh api "repos/$REPO/issues/$pr_number" \
+        --jq "any(.labels[]; .name == \"$HOLD_LABEL\")" | grep -qx true
+}
+
+is_verified() {
+    local sha="$1" run deployment_id deployment acceptance
+
+    run=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?head_sha=$sha&per_page=1" \
+        --jq '.workflow_runs[0] | select(. != null) | "\(.status) \(.conclusion)"')
+    if [[ "$run" != "completed success" ]]; then
+        echo "  ${sha:0:10} $WORKFLOW: ${run:-none}" >&2
+        return 1
+    fi
+
+    acceptance=$(gh api "repos/$REPO/commits/$sha/status?per_page=100" \
+        --jq "[.statuses[] | select(.context == \"$ACCEPTANCE_CONTEXT\") | .state] | first // \"none\"")
+    if [[ "$acceptance" != "success" ]]; then
+        echo "  ${sha:0:10} acceptance: $acceptance" >&2
+        return 1
+    fi
+
+    deployment_id=$(gh api "repos/$REPO/deployments?environment=Staging&sha=$sha&per_page=1" --jq '.[0].id // empty')
+    deployment="none"
+    if [[ -n "$deployment_id" ]]; then
+        deployment=$(gh api "repos/$REPO/deployments/$deployment_id/statuses?per_page=1" --jq '.[0].state // "none"')
+    fi
+    # GitHub marks a successful deployment inactive once a newer one succeeds.
+    if [[ "$deployment" != "success" && "$deployment" != "inactive" ]]; then
+        echo "  ${sha:0:10} Staging deployment: $deployment" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+candidates=()
+while read -r sha subject; do
+    if is_held "$subject"; then
+        echo "  ${sha:0:10} is held with \"$HOLD_LABEL\", so nothing from it on can be chosen" >&2
+        break
+    fi
+    candidates+=("$sha")
+done < <(gh api "repos/$REPO/compare/$BASE...$tip" --jq '.commits[] | "\(.sha) \(.commit.message | split("\n")[0])"')
+
+checked=0
+for ((i = ${#candidates[@]} - 1; i >= 0; i--)); do
+    if ((checked >= MAX_COMMITS)); then
+        echo "No verified commit in the newest $MAX_COMMITS candidates" >&2
+        exit 0
+    fi
+    checked=$((checked + 1))
+    if is_verified "${candidates[$i]}"; then
+        echo "  ${candidates[$i]:0:10} passed every staging check" >&2
+        echo "${candidates[$i]}"
+        exit 0
+    fi
+done
+
+echo "No commit past $BASE passed every staging check" >&2
