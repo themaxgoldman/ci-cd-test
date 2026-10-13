@@ -17,7 +17,7 @@ acceptance tests reported or its deploy never went out. A commit that has
 not finished within the timeout counts as failed.
 
 Commits merged while another commit was in the pipeline are skipped and
-tested as part of the newer commit that runs next. They are marked pending
+tested as part of the newer commit that runs next. They are marked skipped
 while it runs, then passed or failed along with it.
 
 Options:
@@ -101,14 +101,14 @@ recorded_status() {
         --jq "[.[] | select(.context == \"$STATUS_CONTEXT\")] | first // empty | \"\(.state) \(.created_at | fromdateiso8601)\""
 }
 
-waiting_description() {
-    echo "Waiting: tested as part of ${1:0:10}"
+skipped_description() {
+    echo "Skipped: CI/CD jumped to ${1:0:10}"
 }
 
 mark_skipped() {
     local sha="$1" url="$2" skipped
     for skipped in $(gh api "repos/$REPO/compare/$current...$sha" --jq '.commits[:-1][].sha'); do
-        set_status "$skipped" pending "$(waiting_description "$sha")" "$url"
+        set_status "$skipped" pending "$(skipped_description "$sha")" "$url"
     done
 }
 
@@ -117,8 +117,8 @@ finish_skipped() {
     for skipped in $(gh api "repos/$REPO/commits?sha=$sha&per_page=100" --jq '.[1:][].sha'); do
         description=$(gh api "repos/$REPO/commits/$skipped/statuses?per_page=100" \
             --jq "[.[] | select(.context == \"$STATUS_CONTEXT\")] | first // empty | .description")
-        [[ "$description" == "$(waiting_description "$sha")" ]] || break
-        set_status "$skipped" "$state" "$result as part of ${sha:0:10}, not tested on its own" "$url"
+        [[ "$description" == "$(skipped_description "$sha")" ]] || break
+        set_status "$skipped" "$state" "$(skipped_description "$sha"), which $result" "$url"
     done
 }
 
@@ -220,12 +220,12 @@ failure | error) state=failed ;;
     passed)
         url=$(run_url "$current")
         set_status "$current" success "Passed Staging-CD, the staging deploy and acceptance tests" "$url"
-        finish_skipped "$current" success Passed "$url"
+        finish_skipped "$current" success passed "$url"
         ;;
     failed)
         url=$(run_url "$current")
         set_status "$current" failure "Did not pass Staging-CD, the staging deploy and acceptance tests" "$url"
-        finish_skipped "$current" failure Failed "$url"
+        finish_skipped "$current" failure failed "$url"
         ;;
     esac
     ;;
