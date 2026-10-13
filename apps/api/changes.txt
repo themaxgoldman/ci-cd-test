@@ -4,3 +4,4 @@ burst-x3 1791853020
 fail-tests 1791853387
 fail-build 1791854487
 fail-acceptance 1791855151
+pass-after-failures 1791855314
