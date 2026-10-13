@@ -17,8 +17,8 @@ acceptance tests reported or its deploy never went out. A commit that has
 not finished within the timeout counts as failed.
 
 Commits merged while another commit was in the pipeline are skipped and
-tested as part of the newer commit that runs next. They are marked skipped
-while it runs, then passed or failed along with it.
+tested as part of the newer commit that runs next. Each gets a check that is
+in progress while that commit runs, then ends as skipped.
 
 Options:
   --source BRANCH        Branch PRs merge into (default: staging)
@@ -101,24 +101,37 @@ recorded_status() {
         --jq "[.[] | select(.context == \"$STATUS_CONTEXT\")] | first // empty | \"\(.state) \(.created_at | fromdateiso8601)\""
 }
 
-skipped_description() {
+skipped_title() {
     echo "Skipped: CI/CD jumped to ${1:0:10}"
 }
 
 mark_skipped() {
     local sha="$1" url="$2" skipped
     for skipped in $(gh api "repos/$REPO/compare/$current...$sha" --jq '.commits[:-1][].sha'); do
-        set_status "$skipped" pending "$(skipped_description "$sha")" "$url"
+        if [[ "$DRY_RUN" == true ]]; then
+            echo "Would mark ${skipped:0:10} skipped for ${sha:0:10}" >&2
+            continue
+        fi
+        gh api --method POST "repos/$REPO/check-runs" \
+            -f name="$STATUS_CONTEXT" -f head_sha="$skipped" -f status=in_progress -f details_url="$url" \
+            -f "output[title]=$(skipped_title "$sha")" \
+            -f "output[summary]=This commit was not run on its own. Its changes are being tested as part of ${sha:0:10}." --silent
     done
 }
 
 finish_skipped() {
-    local sha="$1" state="$2" result="$3" url="$4" skipped description
+    local sha="$1" skipped check
     for skipped in $(gh api "repos/$REPO/commits?sha=$sha&per_page=100" --jq '.[1:][].sha'); do
-        description=$(gh api "repos/$REPO/commits/$skipped/statuses?per_page=100" \
-            --jq "[.[] | select(.context == \"$STATUS_CONTEXT\")] | first // empty | .description")
-        [[ "$description" == "$(skipped_description "$sha")" ]] || break
-        set_status "$skipped" "$state" "$(skipped_description "$sha"), which $result" "$url"
+        check=$(gh api "repos/$REPO/commits/$skipped/check-runs?check_name=$STATUS_CONTEXT" \
+            --jq "[.check_runs[] | select(.status != \"completed\" and .output.title == \"$(skipped_title "$sha")\")] | first // empty | .id")
+        [[ -n "$check" ]] || break
+        if [[ "$DRY_RUN" == true ]]; then
+            echo "Would finish the skipped check on ${skipped:0:10}" >&2
+            continue
+        fi
+        gh api --method PATCH "repos/$REPO/check-runs/$check" \
+            -f status=completed -f conclusion=skipped -f "output[title]=$(skipped_title "$sha")" \
+            -f "output[summary]=This commit was not run on its own, so it has no result of its own. Its changes were tested as part of ${sha:0:10}." --silent
     done
 }
 
@@ -220,12 +233,12 @@ failure | error) state=failed ;;
     passed)
         url=$(run_url "$current")
         set_status "$current" success "Passed Staging-CD, the staging deploy and acceptance tests" "$url"
-        finish_skipped "$current" success passed "$url"
+        finish_skipped "$current"
         ;;
     failed)
         url=$(run_url "$current")
         set_status "$current" failure "Did not pass Staging-CD, the staging deploy and acceptance tests" "$url"
-        finish_skipped "$current" failure failed "$url"
+        finish_skipped "$current"
         ;;
     esac
     ;;
