@@ -26,8 +26,8 @@ Options:
   -h, --help             Show this help message
 
 Environment:
-  GH_TOKEN               Token whose tag pushes start workflows
-  STATUS_GH_TOKEN        Token for commit statuses (default: GH_TOKEN)
+  GH_TOKEN               Token that reads runs and statuses and sets statuses
+  TAG_GH_TOKEN           Token whose tag pushes start workflows (default: GH_TOKEN)
 
 Examples:
   mise run github:advance-staging-pipeline
@@ -81,8 +81,8 @@ if [[ -z "$REPO" ]]; then
     REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
 fi
 
-status_api() {
-    GH_TOKEN="${STATUS_GH_TOKEN:-${GH_TOKEN:-}}" gh api "$@"
+tag_api() {
+    GH_TOKEN="${TAG_GH_TOKEN:-${GH_TOKEN:-}}" gh api "$@"
 }
 
 set_status() {
@@ -91,7 +91,7 @@ set_status() {
         echo "Would mark ${sha:0:10} $STATUS_CONTEXT=$state ($description)" >&2
         return
     fi
-    status_api --method POST "repos/$REPO/statuses/$sha" \
+    gh api --method POST "repos/$REPO/statuses/$sha" \
         -f state="$state" -f context="$STATUS_CONTEXT" -f description="$description" --silent
 }
 
@@ -149,9 +149,9 @@ start() {
         return
     fi
     set_status "$sha" pending "Waiting for Staging-CD, the staging deploy and acceptance tests"
-    gh api --method POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG_PREFIX$sha" -f sha="$sha" --silent
+    tag_api --method POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG_PREFIX$sha" -f sha="$sha" --silent
     if [[ -n "$old_tag" ]]; then
-        gh api --method DELETE "repos/$REPO/git/refs/tags/$old_tag" --silent
+        tag_api --method DELETE "repos/$REPO/git/refs/tags/$old_tag" --silent
     fi
     echo "Started ${sha:0:10} through the pipeline" >&2
 }
@@ -165,20 +165,19 @@ for tag in $tags; do
     sha="${tag#"$TAG_PREFIX"}"
     if [[ -z "$current" ]] || [[ "$(gh api "repos/$REPO/compare/$current...$sha" --jq '.status')" == "ahead" ]]; then
         if [[ -n "$current_tag" && "$DRY_RUN" != true ]]; then
-            gh api --method DELETE "repos/$REPO/git/refs/tags/$current_tag" --silent
+            tag_api --method DELETE "repos/$REPO/git/refs/tags/$current_tag" --silent
         fi
         current_tag="$tag"
         current="$sha"
     elif [[ "$DRY_RUN" != true ]]; then
-        gh api --method DELETE "repos/$REPO/git/refs/tags/$tag" --silent
+        tag_api --method DELETE "repos/$REPO/git/refs/tags/$tag" --silent
     fi
 done
 
-# A commit whose tag was deleted by hand is still marked pending until it finishes.
 if [[ -z "$current" ]]; then
     for sha in $(gh api "repos/$REPO/commits?sha=$SOURCE&per_page=30" --jq '.[].sha'); do
         if [[ "$(recorded_status "$sha")" == pending* ]]; then
-            echo "The pipeline tag is missing, but ${sha:0:10} is still marked as running" >&2
+            echo "The pipeline tag was deleted, but ${sha:0:10} is still marked as running" >&2
             current="$sha"
             break
         fi

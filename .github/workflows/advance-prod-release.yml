@@ -45,8 +45,8 @@ jobs:
 
       - name: Start the next commit through the staging pipeline
         env:
-          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
-          STATUS_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
         run: bash scripts/advance-staging-pipeline --repo "$GITHUB_REPOSITORY" --timeout-minutes "${{ vars.PIPELINE_TIMEOUT_MINUTES || 90 }}"
 
       - name: Check for a release freeze
