@@ -11,8 +11,6 @@ on:
   push:
     branches:
       - staging
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 concurrency:
