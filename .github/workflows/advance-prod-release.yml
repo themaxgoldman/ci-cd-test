@@ -88,12 +88,42 @@ jobs:
           SHA: ${{ steps.find.outputs.sha }}
         run: bash scripts/advance-prod-release --sha "$SHA" --repo "$GITHUB_REPOSITORY"
 
+      - name: Pause before the history fetch
+        if: vars.TEST_PAUSE_BEFORE_FETCH != ''
+        run: sleep "${{ vars.TEST_PAUSE_BEFORE_FETCH }}"
+
+      - name: Fetch history back to the last released commit
+        id: history
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          base=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...staging" --jq '.merge_base_commit.sha')
+          base_date=$(gh api "repos/$GITHUB_REPOSITORY/commits/$base" --jq '.commit.committer.date')
+          if ! git fetch origin main prod-release staging --no-tags --shallow-since="$base_date"; then
+            if gh api "repos/$GITHUB_REPOSITORY/branches/prod-release" --silent 2>/dev/null; then
+              exit 1
+            fi
+            echo "A release deleted prod-release during this run, so the next run updates the release PR"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch origin main prod-release staging --no-tags --deepen=1
+
+      - name: List unreleased PRs from git
+        if: steps.history.outputs.skip != 'true'
+        run: |
+          base=$(git merge-base origin/main origin/prod-release)
+          echo "merge base: $base"
+          echo "unreleased PRs: $(git log --first-parent --oneline "$base..origin/prod-release" | grep -o '#[0-9]\+' | tr '\n' ' ')"
+
       - name: Update the release PR
+        if: steps.history.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
         run: bash scripts/prepare-release "$GITHUB_REPOSITORY"
 
       - name: Approve the release PR again if a move dismissed its approval
+        if: steps.history.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
