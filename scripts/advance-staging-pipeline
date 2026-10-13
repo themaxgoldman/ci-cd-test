@@ -113,14 +113,14 @@ mark_skipped() {
             continue
         fi
         gh api --method POST "repos/$REPO/check-runs" \
-            -f name="$STATUS_CONTEXT" -f head_sha="$skipped" -f status=in_progress -f details_url="$url" \
+            -f name="$STATUS_CONTEXT" -f head_sha="$skipped" -f status=in_progress \
             -f "output[title]=$(skipped_title "$sha")" \
-            -f "output[summary]=This commit was not run on its own. Its changes are being tested as part of ${sha:0:10}." --silent
+            -f "output[summary]=This commit was not run on its own. Its changes are being tested as part of ${sha:0:10} in [this Staging-CD run]($url)." --silent
     done
 }
 
 finish_skipped() {
-    local sha="$1" skipped check
+    local sha="$1" url="$2" skipped check
     for skipped in $(gh api "repos/$REPO/commits?sha=$sha&per_page=100" --jq '.[1:][].sha'); do
         check=$(gh api "repos/$REPO/commits/$skipped/check-runs?check_name=$STATUS_CONTEXT" \
             --jq "[.check_runs[] | select(.status != \"completed\" and .output.title == \"$(skipped_title "$sha")\")] | first // empty | .id")
@@ -131,7 +131,7 @@ finish_skipped() {
         fi
         gh api --method PATCH "repos/$REPO/check-runs/$check" \
             -f status=completed -f conclusion=skipped -f "output[title]=$(skipped_title "$sha")" \
-            -f "output[summary]=This commit was not run on its own, so it has no result of its own. Its changes were tested as part of ${sha:0:10}." --silent
+            -f "output[summary]=This commit was not run on its own, so it has no result of its own. Its changes were tested as part of ${sha:0:10} in [this Staging-CD run]($url)." --silent
     done
 }
 
@@ -233,12 +233,12 @@ failure | error) state=failed ;;
     passed)
         url=$(run_url "$current")
         set_status "$current" success "Passed Staging-CD, the staging deploy and acceptance tests" "$url"
-        finish_skipped "$current"
+        finish_skipped "$current" "$url"
         ;;
     failed)
         url=$(run_url "$current")
         set_status "$current" failure "Did not pass Staging-CD, the staging deploy and acceptance tests" "$url"
-        finish_skipped "$current"
+        finish_skipped "$current" "$url"
         ;;
     esac
     ;;
