@@ -97,11 +97,14 @@ identical | behind)
 esac
 
 is_held() {
-    local pr_number
+    local pr_number held
     pr_number=$(grep -o '(#[0-9]\+)$' <<<"$1" | tr -d '(#)' || true)
     [[ -n "$pr_number" ]] || return 1
-    gh api "repos/$REPO/issues/$pr_number" \
-        --jq "any(.labels[]; .name == \"$HOLD_LABEL\")" | grep -qx true
+    if ! held=$(gh api "repos/$REPO/pulls/$pr_number" --jq "any(.labels[]; .name == \"$HOLD_LABEL\")"); then
+        echo "ERROR: could not read the labels on #$pr_number" >&2
+        exit 1
+    fi
+    [[ "$held" == true ]]
 }
 
 is_verified() {
