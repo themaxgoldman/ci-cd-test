@@ -4,7 +4,6 @@ name: Advance prod-release
 on:
   workflow_run:
     workflows:
-      - Staging-CD
       - Acceptance Tests
     types:
       - completed
@@ -21,7 +20,7 @@ jobs:
   advance:
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write
       contents: read
       deployments: read
       pull-requests: write
@@ -46,7 +45,6 @@ jobs:
       - name: Start the next commit through the staging pipeline
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
         run: bash scripts/advance-staging-pipeline --repo "$GITHUB_REPOSITORY" --timeout-minutes "${{ vars.PIPELINE_TIMEOUT_MINUTES || 90 }}"
 
       - name: Check for a release freeze
