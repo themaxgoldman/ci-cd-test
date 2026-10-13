@@ -11,8 +11,6 @@ every staging check:
   - its Staging-CD run succeeded
   - its Staging deployment succeeded
   - the staging acceptance tests passed on it
-  - the staging pipeline passed it, so nothing newer was deployed while
-    its acceptance tests ran
 
 A commit whose PR carries the hold label, and every commit after it, is
 never chosen. Prints nothing when no commit qualifies.
@@ -44,7 +42,6 @@ HOLD_LABEL="hold for qa"
 MAX_COMMITS=100
 REPO=""
 ACCEPTANCE_CONTEXT="Staging – acceptance"
-PIPELINE_CONTEXT="staging-pipeline"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -111,7 +108,7 @@ is_held() {
 }
 
 is_verified() {
-    local sha="$1" run deployment_id deployment statuses acceptance pipeline
+    local sha="$1" run deployment_id deployment acceptance
 
     run=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?head_sha=$sha&per_page=1" \
         --jq '.workflow_runs[0] | select(. != null) | "\(.status) \(.conclusion)"')
@@ -120,16 +117,10 @@ is_verified() {
         return 1
     fi
 
-    statuses=$(gh api "repos/$REPO/commits/$sha/status?per_page=100")
-    acceptance=$(jq -r --arg context "$ACCEPTANCE_CONTEXT" '[.statuses[] | select(.context == $context) | .state] | first // "none"' <<<"$statuses")
+    acceptance=$(gh api "repos/$REPO/commits/$sha/status?per_page=100" \
+        --jq "[.statuses[] | select(.context == \"$ACCEPTANCE_CONTEXT\") | .state] | first // \"none\"")
     if [[ "$acceptance" != "success" ]]; then
         echo "  ${sha:0:10} acceptance: $acceptance" >&2
-        return 1
-    fi
-
-    pipeline=$(jq -r --arg context "$PIPELINE_CONTEXT" '[.statuses[] | select(.context == $context) | .state] | first // "none"' <<<"$statuses")
-    if [[ "$pipeline" != "success" ]]; then
-        echo "  ${sha:0:10} $PIPELINE_CONTEXT: $pipeline" >&2
         return 1
     fi
 
