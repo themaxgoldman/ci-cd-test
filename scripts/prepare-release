@@ -5,11 +5,7 @@ REPO="${1:?usage: prepare-release OWNER/REPO}"
 BASE="main"
 HEAD="prod-release"
 SOURCE="staging"
-TITLE="Release: prod-release → Main"
-HOLD_LABEL="hold for qa"
-
-held_file=$(mktemp)
-trap 'rm -f "$held_file"' EXIT
+TITLE="Release: prod-release → main"
 
 list_commits() {
     gh api "repos/$REPO/compare/$1...$2" --jq '.commits[] | "\(.sha) \(.commit.message | split("\n")[0])"'
@@ -29,55 +25,20 @@ pr_entry() {
     gh api "repos/$REPO/issues/$pr_number" --jq '"- [\(.title)](\(.html_url)) (@\(.user.login))"'
 }
 
-is_held() {
-    local pr_number
-    pr_number=$(grep -o '(#[0-9]\+)$' <<<"$1" | tr -d '(#)' || true)
-    [[ -n "$pr_number" ]] || return 1
-    gh api "repos/$REPO/issues/$pr_number" --jq "any(.labels[]; .name == \"$HOLD_LABEL\")" | grep -qx true
-}
-
-list_released() {
+list_prs() {
     while read -r sha subject; do
         pr_entry "$sha" "$subject"
-    done < <(list_commits "$BASE" "$HEAD") | reverse
+    done < <(list_commits "$1" "$2") | reverse
 }
 
-list_not_released() {
-    local held="" entry
-    while read -r sha subject; do
-        entry=$(pr_entry "$sha" "$subject")
-        if is_held "$subject"; then
-            echo "$entry" >>"$held_file"
-            entry+=" — **held for QA**"
-            [[ -z "$held" ]] && held=$(grep -o '(#[0-9]\+)$' <<<"$subject" | tr -d '()')
-        elif [[ -n "$held" ]]; then
-            entry+=" — waiting behind the QA hold on $held"
-        fi
-        echo "$entry"
-    done < <(list_commits "$HEAD" "$SOURCE") | reverse
-}
+released=$(list_prs "$BASE" "$HEAD")
+not_released=$(list_prs "$HEAD" "$SOURCE")
 
-release_status() {
-    if [[ -s "$held_file" ]]; then
-        echo '> [!WARNING]'
-        echo '> **This release is ready.** These PRs on staging are held for QA, so they and everything merged after them are left out of it:'
-        echo '>'
-        sed 's/^/> /' "$held_file"
-        echo '>'
-        # shellcheck disable=SC2016
-        echo '> Remove the `hold for qa` label from these PRs when QA passes to add them to the release.'
-    else
-        echo '> [!TIP]'
-        echo '> **This release is ready.** No PRs are held for QA. This can be released at any time.'
-    fi
-}
-
-released=$(list_released)
-not_released=$(list_not_released)
-
+# shellcheck disable=SC2016
 body="# Release PR - $(date '+%B %-d, %Y')
 
-$(release_status)
+> [!TIP]
+> **This release is ready.** It merges at the next scheduled release. To hold it, add the \`do not merge\` label to this PR.
 
 ## Linked Issues
 
