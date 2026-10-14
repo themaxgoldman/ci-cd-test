@@ -22,6 +22,11 @@ jobs:
         with:
           ref: ${{ github.event.client_payload.sha }}
 
+      - name: Simulated setup before the tests start
+        run: |
+          source sim.env
+          sleep "${ACCEPTANCE_SETUP_SECONDS:-30}"
+
       - name: Set commit status (pending)
         run: |
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
@@ -60,7 +65,7 @@ jobs:
           [[ "$ACCEPTANCE" == "pass" ]]
 
       - name: Set commit status (final)
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           STATE="${{ steps.e2e.outcome == 'success' && 'success' || 'failure' }}"
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \

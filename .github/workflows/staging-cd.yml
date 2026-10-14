@@ -1,9 +1,7 @@
 ---
 name: Staging-CD
 on:
-  push:
-    tags:
-      - "staging-pipeline/*"
+  workflow_dispatch: {}
 
 concurrency:
   group: staging-cd
@@ -79,8 +77,19 @@ jobs:
 
   build_images:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
+      - name: Simulated AWS login
+        run: |
+          token=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          claims=$(cut -d. -f2 <<<"$token" | tr '_-' '/+')
+          while (( ${#claims} % 4 )); do claims+="="; done
+          sub=$(base64 -d <<<"$claims" | jq -r .sub)
+          echo "AWS sees: $sub"
+          [[ "$sub" == repo:* && "$sub" == *":ref:refs/heads/staging" ]]
       - name: Simulated image build
         run: |
           source sim.env
@@ -135,4 +144,44 @@ jobs:
       statuses: write
     if: needs.changes.outputs.knock == 'true'
     uses: ./.github/workflows/knock-templates.yml
+    with:
+      push_to_staging: true
     secrets: inherit
+
+  # Runs started with the default token don't fire other workflows when they finish.
+  report_result:
+    runs-on: ubuntu-latest
+    needs:
+      - find_base
+      - changes
+      - tests
+      - build_images
+      - vercel_build
+      - deploy
+      - knock_templates
+    if: always()
+    permissions:
+      actions: write
+      statuses: write
+    steps:
+      - name: Record the result as staging-cd
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOYED: ${{ needs.deploy.result == 'success' }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ "$DEPLOYED" != true ]]; then
+            state=error description="Did not deploy to staging"
+          elif [[ "$FAILED" == true ]]; then
+            state=failure description="Deployed to staging, but a CI job failed"
+          else
+            state=success description="CI passed and deployed to staging"
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state="$state" -f context=staging-cd -f description="$description" -f target_url="$RUN_URL" --silent
+
+      - name: Start the controller
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run advance-prod-release.yml --repo "$GITHUB_REPOSITORY" --ref staging

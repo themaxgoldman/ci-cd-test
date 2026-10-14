@@ -8,44 +8,96 @@ SOURCE="staging"
 TITLE="Release: prod-release → Main"
 HOLD_LABEL="hold for qa"
 
+held_file=$(mktemp)
+trap 'rm -f "$held_file"' EXIT
+
 list_commits() {
-    gh api "repos/$REPO/compare/$1...$2" --jq '.commits[] | "- \(.commit.message | split("\n")[0])"'
+    gh api "repos/$REPO/compare/$1...$2" --jq '.commits[] | "\(.sha) \(.commit.message | split("\n")[0])"'
+}
+
+reverse() {
+    awk '{ lines[NR] = $0 } END { for (i = NR; i > 0; i--) print lines[i] }'
+}
+
+pr_entry() {
+    local sha="$1" subject="$2" pr_number
+    pr_number=$(grep -o '(#[0-9]\+)$' <<<"$subject" | tr -d '(#)' || true)
+    if [[ -z "$pr_number" ]]; then
+        echo "- ${sha:0:10} $subject"
+        return
+    fi
+    gh api "repos/$REPO/issues/$pr_number" --jq '"- [\(.title)](\(.html_url)) (@\(.user.login))"'
+}
+
+is_held() {
+    local pr_number
+    pr_number=$(grep -o '(#[0-9]\+)$' <<<"$1" | tr -d '(#)' || true)
+    [[ -n "$pr_number" ]] || return 1
+    gh api "repos/$REPO/issues/$pr_number" --jq "any(.labels[]; .name == \"$HOLD_LABEL\")" | grep -qx true
+}
+
+list_released() {
+    while read -r sha subject; do
+        pr_entry "$sha" "$subject"
+    done < <(list_commits "$BASE" "$HEAD") | reverse
 }
 
 list_not_released() {
-    local held="" lines="" line pr_number
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        pr_number=$(grep -o '(#[0-9]\+)$' <<<"$line" | tr -d '(#)' || true)
-        if [[ -n "$pr_number" ]] && gh api "repos/$REPO/issues/$pr_number" \
-            --jq "any(.labels[]; .name == \"$HOLD_LABEL\")" | grep -qx true; then
-            line+=" — **held for QA**"
-            [[ -z "$held" ]] && held="#$pr_number"
+    local held="" entry
+    while read -r sha subject; do
+        entry=$(pr_entry "$sha" "$subject")
+        if is_held "$subject"; then
+            echo "$entry" >>"$held_file"
+            entry+=" — **held for QA**"
+            [[ -z "$held" ]] && held=$(grep -o '(#[0-9]\+)$' <<<"$subject" | tr -d '()')
         elif [[ -n "$held" ]]; then
-            line+=" — waiting behind the QA hold on $held"
+            entry+=" — waiting behind the QA hold on $held"
         fi
-        lines+="$line"$'\n'
-    done < <(list_commits "$HEAD" "$SOURCE")
-    if [[ -n "$held" ]]; then
-        printf "> %s is held for QA. It and everything merged after it stay out of the release until the \`%s\` label is removed.\n\n" "$held" "$HOLD_LABEL"
-    fi
-    printf '%s' "$lines"
+        echo "$entry"
+    done < <(list_commits "$HEAD" "$SOURCE") | reverse
 }
 
-in_release=$(list_commits "$BASE" "$HEAD")
+release_status() {
+    if [[ -s "$held_file" ]]; then
+        echo '> [!WARNING]'
+        echo '> **This release is ready.** These PRs on staging are held for QA, so they and everything merged after them are left out of it:'
+        echo '>'
+        sed 's/^/> /' "$held_file"
+        echo '>'
+        # shellcheck disable=SC2016
+        echo '> Remove the `hold for qa` label from these PRs when QA passes to add them to the release.'
+    else
+        echo '> [!TIP]'
+        echo '> **This release is ready.** No PRs are held for QA. This can be released at any time.'
+    fi
+}
+
+released=$(list_released)
 not_released=$(list_not_released)
 
-body="## In This Release
+body="# Release PR - $(date '+%B %-d, %Y')
 
-${in_release:-_Nothing to release._}
+$(release_status)
+
+## Linked Issues
+
+_No linked Linear issues found in staging._
+
+## Unlinked Work
+
+${released:-_No unlinked PRs found._}
 
 ## On Staging, Not In This Release
 
-${not_released:-_Everything merged into \`$SOURCE\` is in this release._}"
+${not_released:-_Everything merged into \`$SOURCE\` is in this release._}
+
+## Release Notes
+
+_No additional release notes._"
 
 pr=$(gh pr list --repo "$REPO" --base "$BASE" --head "$HEAD" --state open --json number --jq '.[0].number // empty')
 if [[ -z "$pr" ]]; then
-    if [[ -z "$in_release" ]]; then
+    if [[ -z "$released" ]]; then
         echo "No commits between $BASE and $HEAD. Nothing to release."
         exit 0
     fi

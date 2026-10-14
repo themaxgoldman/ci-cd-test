@@ -1,7 +1,11 @@
 ---
 name: Knock Email Templates
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      push_to_staging:
+        type: boolean
+        default: false
 
 jobs:
   push:
@@ -10,6 +14,7 @@ jobs:
       statuses: write
     steps:
       - name: Simulated Knock template sync to staging
+        if: inputs.push_to_staging
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
