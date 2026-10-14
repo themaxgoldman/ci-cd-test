@@ -14,11 +14,11 @@ A passing test here only proves what the sandbox actually models. Check this tab
 | Acceptance tests (`cancel-in-progress`, pending then final status) | Same concurrency and status steps. `ACCEPTANCE_SETUP_SECONDS` models the ~40s before chariot posts pending. Also posts an `alignment` status that fails if staging changed mid-run. | The real test suite and how long it takes. |
 | Controller and its scripts | Same scripts as chariot's `mise/tasks/github/*` | — |
 | Release PR description (`prepare-release`) | A simplified script using the compare API, plus a step that runs chariot's git history fetch and lists unreleased PRs the same way | The real script: Linear linking, gum, the template. Replay it against real chariot data instead. |
-| Old `staging → main` release PR (`release_preparer.yml`) | Not modelled | Anything about that PR, such as its diff going stale after a release |
+| Release conductor (`release_conductor.yml`) | Same steps, with `PIPELINE_TOKEN` in place of the Nike app. Started by hand, from `staging` while testing | Chariot's deploy repo cron starts it from `main`, so a conductor change only takes effect in chariot once it has been released |
 | **Tokens** | `PIPELINE_TOKEN` is a personal access token that can do everything. It stands in for the Nike app. | **Missing app permissions.** The Nike app can't read commit statuses, for example. Check each Nike call against its permissions instead. |
 | **Repo visibility** | Public, because rulesets need a paid plan on private personal repos | **Missing `GITHUB_TOKEN` permissions.** Public data is readable without them, for example issues. Check every call against the job's `permissions:` instead. |
-| `main` rules | PR, required checks (`staging-verified`, `check-label`, `validate`), required Staging deployment | Chariot also requires `Staging – acceptance`, `check`, `check-description` and a releasers-team approval |
-| `staging` rules | None | Chariot requires PRs, linear history, signed commits and checks, including `check-release-freeze` |
+| `main` rules | PR with one approval, required checks (`check-label`, `validate`, `staging-cd`, `Staging – acceptance`) | Chariot also requires `check`, `check-description` and a releasers-team approval |
+| `staging` rules | None | Chariot requires PRs, linear history, signed commits and checks |
 | `prod-release` rules | Restrict deletions | Chariot has none yet, so there releases still delete `prod-release` |
 | Linear | Not modelled | Release PR linking, which depends on each issue's state |
 | Timing | Staging-CD takes about 1 minute; chariot's takes 5–10 | Races that only show with long runs. Use the `TEST_PAUSE_BEFORE_FETCH` variable or longer `sim.env` timings to widen them. |

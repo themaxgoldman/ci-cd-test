@@ -7,16 +7,13 @@ usage() {
 Usage: mise run github:find-verified-commit [OPTIONS]
 
 Print the newest commit on the source branch, past the base, whose
-staging-cd status and staging acceptance tests both succeeded.
-
-A commit whose PR carries the hold label, and every commit after it, is
-never chosen. Prints nothing when no commit qualifies.
+staging-cd status and staging acceptance tests both succeeded. Prints
+nothing when no commit qualifies.
 
 Options:
   --source BRANCH      Branch to search (default: staging)
   --branch NAME        Branch whose tip is the base (default: prod-release)
   --base SHA           Use this commit as the base instead of the branch tip
-  --hold-label NAME    PR label that keeps a commit out (default: hold for qa)
   --max-commits N      Give up after checking this many commits (default: 100)
   --repo OWNER/REPO    GitHub repository (default: current repo from gh)
   -h, --help           Show this help message
@@ -33,7 +30,6 @@ EOF
 SOURCE="staging"
 BRANCH="prod-release"
 BASE=""
-HOLD_LABEL="hold for qa"
 MAX_COMMITS=100
 REPO=""
 CD_CONTEXT="staging-cd"
@@ -45,7 +41,7 @@ while [[ $# -gt 0 ]]; do
         usage
         exit 0
         ;;
-    --source | --branch | --base | --hold-label | --max-commits | --repo)
+    --source | --branch | --base | --max-commits | --repo)
         if [[ -z "${2:-}" ]]; then
             echo "ERROR: $1 requires a value" >&2
             usage
@@ -55,7 +51,6 @@ while [[ $# -gt 0 ]]; do
         --source) SOURCE="$2" ;;
         --branch) BRANCH="$2" ;;
         --base) BASE="$2" ;;
-        --hold-label) HOLD_LABEL="$2" ;;
         --max-commits) MAX_COMMITS="$2" ;;
         --repo) REPO="$2" ;;
         esac
@@ -91,17 +86,6 @@ identical | behind)
     ;;
 esac
 
-is_held() {
-    local pr_number held
-    pr_number=$(grep -o '(#[0-9]\+)$' <<<"$1" | tr -d '(#)' || true)
-    [[ -n "$pr_number" ]] || return 1
-    if ! held=$(gh api "repos/$REPO/pulls/$pr_number" --jq "any(.labels[]; .name == \"$HOLD_LABEL\")"); then
-        echo "ERROR: could not read the labels on #$pr_number" >&2
-        exit 1
-    fi
-    [[ "$held" == true ]]
-}
-
 state_of() {
     jq -r --arg context "$2" '[.statuses[] | select(.context == $context) | .state] | first // "none"' <<<"$1"
 }
@@ -118,13 +102,9 @@ is_verified() {
 }
 
 candidates=()
-while read -r sha subject; do
-    if is_held "$subject"; then
-        echo "  ${sha:0:10} is held with \"$HOLD_LABEL\", so nothing from it on can be chosen" >&2
-        break
-    fi
+while read -r sha; do
     candidates+=("$sha")
-done < <(gh api "repos/$REPO/compare/$BASE...$tip" --jq '.commits[] | "\(.sha) \(.commit.message | split("\n")[0])"')
+done < <(gh api "repos/$REPO/compare/$BASE...$tip" --jq '.commits[].sha')
 
 checked=0
 for ((i = ${#candidates[@]} - 1; i >= 0; i--)); do
