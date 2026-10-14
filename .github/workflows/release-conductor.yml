@@ -7,16 +7,44 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+      statuses: read
     steps:
+      - name: Find the release PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head prod-release --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            echo "No open release PR"
+          fi
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the release PR's checks
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: gh pr checks "$PR" --repo "$GITHUB_REPOSITORY" --required --watch --fail-fast --interval 15
+
       - name: Merge the release PR
+        if: steps.pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
         run: |
-          read -r PR SHA < <(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head prod-release --state open \
-            --json number,headRefOid --jq '.[0] | select(. != null) | "\(.number) \(.headRefOid)"') || true
-          if [ -z "${PR:-}" ]; then
-            echo "No open release PR, nothing to release"
-            exit 0
-          fi
-          gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$SHA"
-          echo "Merged release PR #$PR at $SHA"
+          HEAD=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid')
+          for _ in 1 2 3 4 5 6; do
+            if gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$HEAD"; then
+              echo "Released #$PR at $HEAD"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "ERROR: could not merge #$PR at $HEAD" >&2
+          exit 1

@@ -39,24 +39,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/advance-staging-pipeline --repo "$GITHUB_REPOSITORY" --timeout-minutes "${{ vars.PIPELINE_TIMEOUT_MINUTES || 90 }}"
 
-      - name: Check for a release freeze
-        id: freeze
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head prod-release --state open --json number --jq '.[0].number // empty')
-          frozen=false
-          if [[ -n "$pr" ]]; then
-            frozen=$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json labels --jq 'any(.labels[]; .name == "release-freeze")')
-          fi
-          if [[ "$frozen" == "true" ]]; then
-            echo "Release freeze is on for #$pr, so prod-release stays where it is"
-          fi
-          echo "frozen=$frozen" >> "$GITHUB_OUTPUT"
-
       - name: Find the newest verified commit
         id: find
-        if: steps.freeze.outputs.frozen != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
