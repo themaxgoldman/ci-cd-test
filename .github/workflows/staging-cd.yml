@@ -149,7 +149,7 @@ jobs:
     secrets: inherit
 
   # Runs started with the default token don't fire other workflows when they finish.
-  report_result:
+  notify_controller:
     runs-on: ubuntu-latest
     needs:
       - find_base
@@ -162,25 +162,7 @@ jobs:
     if: always()
     permissions:
       actions: write
-      statuses: write
     steps:
-      - name: Record the result as staging-cd
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEPLOYED: ${{ needs.deploy.result == 'success' }}
-          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [[ "$DEPLOYED" != true ]]; then
-            state=error description="Did not deploy to staging"
-          elif [[ "$FAILED" == true ]]; then
-            state=failure description="Deployed to staging, but a CI job failed"
-          else
-            state=success description="CI passed and deployed to staging"
-          fi
-          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
-            -f state="$state" -f context=staging-cd -f description="$description" -f target_url="$RUN_URL" --silent
-
       - name: Start the controller
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -7,19 +7,14 @@ usage() {
 Usage: mise run github:advance-staging-pipeline [OPTIONS]
 
 One commit at a time goes through Staging-CD, its deploy and its acceptance
-tests. The commit in the pipeline is the newest one with a staging-verified
-status, which is pending while it runs. Once that commit has finished, mark
-it staging-verified success or failure, start Staging-CD on the source
-branch, which runs its newest commit, and mark that commit pending. Until
-then, do nothing.
+tests. The commit in the pipeline is the newest one marked with a pending
+staging-pipeline status. Once that commit has finished, start Staging-CD on
+the source branch, which runs its newest commit, and mark that commit
+pending. Until then, do nothing.
 
-Staging-CD reports its own result as a staging-cd status: success when CI
-passed and the commit deployed, failure when CI failed but the commit
-deployed anyway, and error when it never deployed. A commit has finished
-when staging-cd is error, or when staging-cd is success or failure and its
-acceptance tests reported. It passes only when staging-cd and the acceptance
-tests both succeeded. A commit that has not finished within the timeout
-counts as failed.
+A commit has finished when its Staging-CD run is done and either its
+acceptance tests reported or its deploy never went out. A commit that has
+not finished within the timeout counts as failed.
 
 Options:
   --source BRANCH        Branch PRs merge into (default: staging)
@@ -30,7 +25,7 @@ Options:
   -h, --help             Show this help message
 
 Environment:
-  GH_TOKEN               Token that reads and sets statuses and starts the workflow
+  GH_TOKEN               Token that reads runs and statuses, sets statuses and starts the workflow
 
 Examples:
   mise run github:advance-staging-pipeline
@@ -43,9 +38,9 @@ WORKFLOW="staging-cd.yml"
 TIMEOUT_MINUTES=90
 REPO=""
 DRY_RUN=false
-VERIFIED_CONTEXT="staging-verified"
-CD_CONTEXT="staging-cd"
+STATUS_CONTEXT="staging-pipeline"
 ACCEPTANCE_CONTEXT="Staging – acceptance"
+NOTIFY_JOB="notify_controller"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -83,38 +78,57 @@ if [[ -z "$REPO" ]]; then
     REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
 fi
 
-set_verified() {
+set_status() {
     local sha="$1" state="$2" description="$3" url="${4:-}"
     if [[ "$DRY_RUN" == true ]]; then
-        echo "Would mark ${sha:0:10} $VERIFIED_CONTEXT=$state ($description)" >&2
+        echo "Would mark ${sha:0:10} $STATUS_CONTEXT=$state ($description)" >&2
         return
     fi
     gh api --method POST "repos/$REPO/statuses/$sha" \
-        -f state="$state" -f context="$VERIFIED_CONTEXT" -f description="$description" -f target_url="$url" --silent
+        -f state="$state" -f context="$STATUS_CONTEXT" -f description="$description" -f target_url="$url" --silent
 }
 
-statuses() {
-    gh api "repos/$REPO/commits/$1/status?per_page=100"
+run_url() {
+    gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?head_sha=$1&per_page=1" --jq '.workflow_runs[0].html_url // empty'
 }
 
-field() {
-    jq -r --arg context "$2" --arg field "$3" '[.statuses[] | select(.context == $context) | .[$field]] | first // "none"' <<<"$1"
+recorded_status() {
+    gh api "repos/$REPO/commits/$1/statuses?per_page=100" \
+        --jq "[.[] | select(.context == \"$STATUS_CONTEXT\")] | first // empty | \"\(.state) \(.created_at | fromdateiso8601)\""
+}
+
+run_result() {
+    local run_id="$1" run_status="$2" run_conclusion="$3" jobs
+    if [[ "$run_status" == "completed" ]]; then
+        echo "completed $run_conclusion"
+        return
+    fi
+    jobs=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100")
+    # The run's last job is the one that starts this check, so the run counts as done once that job has started.
+    if jq -e --arg notify "$NOTIFY_JOB" 'any(.jobs[]; .name == $notify and .status != "queued" and .status != "waiting" and .status != "pending")' <<<"$jobs" >/dev/null; then
+        jq -r --arg notify "$NOTIFY_JOB" '[.jobs[] | select(.name != $notify) | .conclusion]
+            | if any(.[]; . == "failure" or . == "cancelled" or . == "timed_out" or . == "startup_failure") then "completed failure" else "completed success" end' <<<"$jobs"
+        return
+    fi
+    echo "$run_status none"
 }
 
 pipeline_state() {
-    local statuses="$1" cd acceptance started
-    cd=$(field "$statuses" "$CD_CONTEXT" state)
-    acceptance=$(field "$statuses" "$ACCEPTANCE_CONTEXT" state)
+    local sha="$1" recorded="$2" run run_id run_status run_conclusion acceptance deploy
 
-    case "$cd" in
-    error)
-        echo failed
-        return
-        ;;
-    success | failure)
+    run=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?head_sha=$sha&per_page=1" \
+        --jq '.workflow_runs[0] | select(. != null) | "\(.id) \(.status) \(.conclusion)"')
+    read -r run_id run_status run_conclusion <<<"${run:-}"
+    if [[ -n "${run_id:-}" ]]; then
+        read -r run_status run_conclusion <<<"$(run_result "$run_id" "$run_status" "$run_conclusion")"
+    fi
+
+    if [[ "${run_status:-}" == "completed" ]]; then
+        acceptance=$(gh api "repos/$REPO/commits/$sha/status?per_page=100" \
+            --jq "[.statuses[] | select(.context == \"$ACCEPTANCE_CONTEXT\") | .state] | first // \"none\"")
         case "$acceptance" in
         success)
-            [[ "$cd" == "success" ]] && echo passed || echo failed
+            [[ "$run_conclusion" == "success" ]] && echo passed || echo failed
             return
             ;;
         failure | error)
@@ -122,11 +136,16 @@ pipeline_state() {
             return
             ;;
         esac
-        ;;
-    esac
 
-    started=$(jq -r --arg context "$VERIFIED_CONTEXT" '[.statuses[] | select(.context == $context) | .created_at | fromdateiso8601] | first' <<<"$statuses")
-    if (($(date -u +%s) - started > TIMEOUT_MINUTES * 60)); then
+        deploy=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.name == "deploy") | .conclusion] | first // "none"')
+        if [[ "$deploy" != "success" ]]; then
+            echo failed
+            return
+        fi
+    fi
+
+    if (($(date -u +%s) - ${recorded#* } > TIMEOUT_MINUTES * 60)); then
         echo failed
         return
     fi
@@ -142,17 +161,17 @@ start() {
     run=$(gh api --method POST "repos/$REPO/actions/workflows/$WORKFLOW/dispatches" \
         -f ref="$SOURCE" -F return_run_details=true --jq '"\(.workflow_run_id) \(.html_url)"')
     sha=$(gh api "repos/$REPO/actions/runs/${run%% *}" --jq '.head_sha')
-    set_verified "$sha" pending "Waiting for Staging-CD, the staging deploy and acceptance tests" "${run#* }"
+    set_status "$sha" pending "Waiting for Staging-CD, the staging deploy and acceptance tests" "${run#* }"
     echo "Started ${sha:0:10} through the pipeline in ${run#* }" >&2
 }
 
 tip=$(gh api "repos/$REPO/branches/$SOURCE" --jq '.commit.sha')
 
 current=""
-current_statuses=""
+recorded=""
 for sha in $(gh api "repos/$REPO/commits?sha=$SOURCE&per_page=100" --jq '.[].sha'); do
-    current_statuses=$(statuses "$sha")
-    if [[ "$(field "$current_statuses" "$VERIFIED_CONTEXT" state)" != "none" ]]; then
+    recorded=$(recorded_status "$sha")
+    if [[ -n "$recorded" ]]; then
         current="$sha"
         break
     fi
@@ -164,15 +183,20 @@ if [[ -z "$current" ]]; then
     exit 0
 fi
 
-case "$(field "$current_statuses" "$VERIFIED_CONTEXT" state)" in
+case "${recorded%% *}" in
 success) state=passed ;;
 failure | error) state=failed ;;
 *)
-    state=$(pipeline_state "$current_statuses")
-    url=$(field "$current_statuses" "$VERIFIED_CONTEXT" target_url)
+    state=$(pipeline_state "$current" "$recorded")
     case "$state" in
-    passed) set_verified "$current" success "Passed Staging-CD, the staging deploy and acceptance tests" "$url" ;;
-    failed) set_verified "$current" failure "Did not pass Staging-CD, the staging deploy and acceptance tests" "$url" ;;
+    passed)
+        url=$(run_url "$current")
+        set_status "$current" success "Passed Staging-CD, the staging deploy and acceptance tests" "$url"
+        ;;
+    failed)
+        url=$(run_url "$current")
+        set_status "$current" failure "Did not pass Staging-CD, the staging deploy and acceptance tests" "$url"
+        ;;
     esac
     ;;
 esac
