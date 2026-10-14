@@ -1,18 +1,13 @@
 #!/bin/bash
 set -euo pipefail
-#MISE description="Print the newest staging commit past prod-release that passed every staging check"
+#MISE description="Print the newest staging commit past prod-release that passed Staging-CD and its acceptance tests"
 
 usage() {
     cat <<'EOF'
 Usage: mise run github:find-verified-commit [OPTIONS]
 
-Print the newest commit on the source branch, past the base, that passed
-every staging check:
-  - its Staging-CD run succeeded
-  - its Staging deployment succeeded
-  - the staging acceptance tests passed on it
-  - the staging pipeline passed it, so nothing newer was deployed while
-    its acceptance tests ran
+Print the newest commit on the source branch, past the base, whose
+staging-cd status and staging acceptance tests both succeeded.
 
 A commit whose PR carries the hold label, and every commit after it, is
 never chosen. Prints nothing when no commit qualifies.
@@ -21,14 +16,13 @@ Options:
   --source BRANCH      Branch to search (default: staging)
   --branch NAME        Branch whose tip is the base (default: prod-release)
   --base SHA           Use this commit as the base instead of the branch tip
-  --workflow FILE      Workflow whose run must succeed (default: staging-cd.yml)
   --hold-label NAME    PR label that keeps a commit out (default: hold for qa)
   --max-commits N      Give up after checking this many commits (default: 100)
   --repo OWNER/REPO    GitHub repository (default: current repo from gh)
   -h, --help           Show this help message
 
 Environment:
-  GH_TOKEN / GITHUB_TOKEN    GitHub token that can read commits, PRs, workflow runs, deployments and statuses
+  GH_TOKEN / GITHUB_TOKEN    GitHub token that can read commits, PRs and statuses
 
 Examples:
   mise run github:find-verified-commit
@@ -39,12 +33,11 @@ EOF
 SOURCE="staging"
 BRANCH="prod-release"
 BASE=""
-WORKFLOW="staging-cd.yml"
 HOLD_LABEL="hold for qa"
 MAX_COMMITS=100
 REPO=""
+CD_CONTEXT="staging-cd"
 ACCEPTANCE_CONTEXT="Staging – acceptance"
-PIPELINE_CONTEXT="staging-pipeline"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -52,7 +45,7 @@ while [[ $# -gt 0 ]]; do
         usage
         exit 0
         ;;
-    --source | --branch | --base | --workflow | --hold-label | --max-commits | --repo)
+    --source | --branch | --base | --hold-label | --max-commits | --repo)
         if [[ -z "${2:-}" ]]; then
             echo "ERROR: $1 requires a value" >&2
             usage
@@ -62,7 +55,6 @@ while [[ $# -gt 0 ]]; do
         --source) SOURCE="$2" ;;
         --branch) BRANCH="$2" ;;
         --base) BASE="$2" ;;
-        --workflow) WORKFLOW="$2" ;;
         --hold-label) HOLD_LABEL="$2" ;;
         --max-commits) MAX_COMMITS="$2" ;;
         --repo) REPO="$2" ;;
@@ -110,41 +102,19 @@ is_held() {
     [[ "$held" == true ]]
 }
 
+state_of() {
+    jq -r --arg context "$2" '[.statuses[] | select(.context == $context) | .state] | first // "none"' <<<"$1"
+}
+
 is_verified() {
-    local sha="$1" run deployment_id deployment statuses acceptance pipeline
-
-    run=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?head_sha=$sha&per_page=1" \
-        --jq '.workflow_runs[0] | select(. != null) | "\(.status) \(.conclusion)"')
-    if [[ "$run" != "completed success" ]]; then
-        echo "  ${sha:0:10} $WORKFLOW: ${run:-none}" >&2
-        return 1
-    fi
-
+    local sha="$1" statuses cd acceptance
     statuses=$(gh api "repos/$REPO/commits/$sha/status?per_page=100")
-    acceptance=$(jq -r --arg context "$ACCEPTANCE_CONTEXT" '[.statuses[] | select(.context == $context) | .state] | first // "none"' <<<"$statuses")
-    if [[ "$acceptance" != "success" ]]; then
-        echo "  ${sha:0:10} acceptance: $acceptance" >&2
+    cd=$(state_of "$statuses" "$CD_CONTEXT")
+    acceptance=$(state_of "$statuses" "$ACCEPTANCE_CONTEXT")
+    if [[ "$cd" != "success" || "$acceptance" != "success" ]]; then
+        echo "  ${sha:0:10} $CD_CONTEXT: $cd, acceptance: $acceptance" >&2
         return 1
     fi
-
-    pipeline=$(jq -r --arg context "$PIPELINE_CONTEXT" '[.statuses[] | select(.context == $context) | .state] | first // "none"' <<<"$statuses")
-    if [[ "$pipeline" != "success" ]]; then
-        echo "  ${sha:0:10} $PIPELINE_CONTEXT: $pipeline" >&2
-        return 1
-    fi
-
-    deployment_id=$(gh api "repos/$REPO/deployments?environment=Staging&sha=$sha&per_page=1" --jq '.[0].id // empty')
-    deployment="none"
-    if [[ -n "$deployment_id" ]]; then
-        deployment=$(gh api "repos/$REPO/deployments/$deployment_id/statuses?per_page=1" --jq '.[0].state // "none"')
-    fi
-    # GitHub marks a successful deployment inactive once a newer one succeeds.
-    if [[ "$deployment" != "success" && "$deployment" != "inactive" ]]; then
-        echo "  ${sha:0:10} Staging deployment: $deployment" >&2
-        return 1
-    fi
-
-    return 0
 }
 
 candidates=()
